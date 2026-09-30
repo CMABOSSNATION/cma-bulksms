@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CMA Bulk SMS</title>
+<style>
+:root{--bg:#f5f6f2;--card:#fff;--ink:#17261f;--muted:#5d6b64;--line:#dfe4de;--brand:#0b6b4d;--brand-ink:#fff;--bad:#b3261e;--radius:10px}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1713;--card:#17221c;--ink:#e8efe9;--muted:#93a39a;--line:#2a3831;--brand:#3fbf8f;--brand-ink:#08130e;--bad:#ff8a80}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:720px;margin:0 auto;padding:16px}
+h1{font-size:1.25rem;margin:0}h2{font-size:1.05rem;margin:0 0 12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin-bottom:16px}
+.bar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
+.sub{color:var(--muted);font-size:.9rem}
+label{display:block;font-size:.9rem;margin:12px 0 4px}
+input,select,textarea{width:100%;padding:11px 12px;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px}
+textarea{min-height:110px;resize:vertical}
+input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+button{font:inherit;padding:10px 16px;border-radius:8px;border:1px solid var(--brand);background:var(--brand);color:var(--brand-ink);cursor:pointer}
+button.ghost{background:transparent;color:var(--brand)}
+button.small{padding:5px 10px;font-size:.85rem}
+button:disabled{opacity:.6}
+form button.full{margin-top:16px;width:100%}
+.tabs{display:flex;gap:6px;margin-bottom:16px;overflow-x:auto}
+.tabs button{background:transparent;color:var(--ink);border-color:var(--line);white-space:nowrap}
+.tabs button.on{background:var(--brand);color:var(--brand-ink);border-color:var(--brand)}
+.err{color:var(--bad);min-height:1.4em;margin:8px 0 0;font-size:.9rem}
+.ok{color:var(--brand);margin:8px 0 0;font-size:.9rem}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:12px}
+.stat b{display:block;font-size:1.4rem}
+.row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 0;border-top:1px solid var(--line)}
+.row:first-of-type{border-top:0}
+.row>div:first-child{min-width:0;overflow-wrap:anywhere}
+.pos{color:var(--brand)}.neg{color:var(--bad)}
+.empty{color:var(--muted)}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<main>
+  <section id="login" class="hidden">
+    <div class="card">
+      <h1>CMA Bulk SMS</h1>
+      <p class="sub">Log in to send messages to your customers.</p>
+      <form id="loginForm">
+        <label for="email">Email</label>
+        <input id="email" type="email" autocomplete="username" required>
+        <label for="password">Password</label>
+        <input id="password" type="password" autocomplete="current-password" required>
+        <p class="err" id="loginErr" role="alert"></p>
+        <button class="full" type="submit">Log in</button>
+      </form>
+    </div>
+  </section>
+
+  <section id="app" class="hidden">
+    <div class="bar">
+      <div><h1 id="title">CMA Bulk SMS</h1><div class="sub" id="who"></div></div>
+      <button class="ghost" id="logout" type="button">Log out</button>
+    </div>
+    <nav class="tabs" id="tabs"></nav>
+    <div id="view"></div>
+  </section>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const ugx = (n) => 'UGX ' + Number(n || 0).toLocaleString('en-US');
+const show = (id, on) => $(id).classList.toggle('hidden', !on);
+let me = null, tab = null;
+
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: body ? 'POST' : 'GET',
+    headers: body ? { 'Content-Type': 'application/json' } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && me) { location.reload(); }
+  if (!res.ok) throw new Error(data.error || 'Something went wrong');
+  return data;
+}
+
+const GSM = /^[A-Za-z0-9 @£$¥èéùìòÇ\r\nØøÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ!"#¤%&'()*+,\-./:;<=>?¡ÄÖÑÜ§¿äöñüà]*$/;
+const EXT = /[{}\[\]~^|\\€]/g;
+function segments(t) {
+  if (!t) return 0;
+  const ext = (t.match(EXT) || []).length;
+  if (GSM.test(t.replace(EXT, ''))) { const l = t.length + ext; return l <= 160 ? 1 : Math.ceil(l / 153); }
+  return t.length <= 70 ? 1 : Math.ceil(t.length / 67);
+}
+
+const TABS = {
+  business: [['home', 'Home'], ['contacts', 'Contacts'], ['send', 'Send'], ['wallet', 'Wallet']],
+  admin: [['businesses', 'Businesses'], ['settings', 'Settings']],
+};
+const VIEWS = {};
+
+function go(t) {
+  tab = t;
+  $('#tabs').innerHTML = TABS[me.role === 'admin' ? 'admin' : 'business']
+    .map(([k, l]) => `<button type="button" data-t="${k}" class="${k === t ? 'on' : ''}">${l}</button>`).join('');
+  $('#tabs').querySelectorAll('button').forEach((b) => b.onclick = () => go(b.dataset.t));
+  $('#view').innerHTML = '<p class="empty">Loading…</p>';
+  VIEWS[t]().catch((e) => { $('#view').innerHTML = `<p class="err">${esc(e.message)}</p>`; });
+}
+
+// ----- Business views -----
+const STATUS = { scheduled: 'Scheduled', queued: 'Queued', sent: 'Sent', cancelled: 'Cancelled', failed: 'Failed' };
+
+VIEWS.home = async () => {
+  const [s, c] = await Promise.all([api('/api/stats'), api('/api/campaigns')]);
+  me = { ...me, ...(await api('/api/me')) };
+  $('#view').innerHTML = `
+    <div class="stats">
+      <div class="stat"><span class="sub">SMS sent (24h)</span><b>${s.sent24}</b></div>
+      <div class="stat"><span class="sub">In queue</span><b>${s.queue}</b></div>
+      <div class="stat"><span class="sub">Spent today</span><b>${ugx(s.spent)}</b></div>
+      <div class="stat"><span class="sub">Wallet balance</span><b>${ugx(me.business.balance)}</b></div>
+    </div>
+    <div class="card"><h2>Recent campaigns</h2>
+    ${c.campaigns.length ? c.campaigns.map((x) => `
+      <div class="row"><div>${esc(x.name)}<div class="sub">${x.recipients} numbers · ${ugx(x.cost)} · ${STATUS[x.status] || x.status}${x.status === 'queued' ? ` (${x.pending} waiting)` : ''}${x.status === 'scheduled' ? ' for ' + new Date(x.scheduled_at).toLocaleString() : ''}</div></div>
+      ${['queued', 'scheduled'].includes(x.status) ? `<button class="ghost small" data-cancel="${x.id}">Cancel</button>` : ''}</div>`).join('')
+      : '<p class="empty">No campaigns yet. Open Send to send your first message.</p>'}
+    <p class="sub">Sent means the message left the queue. The provider does not report delivery to the phone.</p>
+    <p class="err" id="homeErr"></p></div>`;
+  $('#view').querySelectorAll('[data-cancel]').forEach((b) => b.onclick = async () => {
+    if (!confirm('Cancel the messages that are still waiting? You get credit back for them.')) return;
+    b.disabled = true;
+    try {
+      const r = await api(`/api/campaigns/${b.dataset.cancel}/cancel`, {});
+      if (r.remaining > 0) alert(`Cancelled ${r.deleted}. ${r.remaining} still waiting. Press Cancel again.`);
+    } catch (e) { $('#homeErr').textContent = e.message; }
+    go('home');
+  });
+};
+
+function parseCsv(t) {
+  const rows = t.split(/\r?\n/).map((l) => l.split(',').map((x) => x.trim().replace(/^"|"$/g, ''))).filter((r) => r.some(Boolean));
+  if (rows.length && !/\d{6}/.test(rows[0].join(''))) rows.shift();
+  return rows.map((r) => r.length === 1 ? { phone: r[0] } : { name: r[0], phone: r[1], grp: r[2] });
+}
+
+VIEWS.contacts = async () => {
+  const d = await api('/api/contacts');
+  $('#view').innerHTML = `
+    <div class="card"><h2>Add a contact</h2>
+      <form id="cForm">
+        <label for="cName">Name</label><input id="cName">
+        <label for="cPhone">Phone number</label><input id="cPhone" inputmode="tel" placeholder="0701234567" required>
+        <label for="cGroup">Group (optional)</label><input id="cGroup" placeholder="Customers">
+        <button class="full" type="submit">Save contact</button>
+      </form>
+      <label for="csv">Or upload a CSV file</label>
+      <input id="csv" type="file" accept=".csv,text/csv,text/plain">
+      <p class="sub">Columns: name, phone, group. A file with only phone numbers also works.</p>
+      <p class="err" id="cErr" role="alert"></p><p class="ok" id="cOk"></p>
+    </div>
+    <div class="card"><h2>Contacts (${d.total})</h2>
+      ${d.groups.length ? `<p class="sub">Groups: ${d.groups.map((g) => esc(g.grp) + ' (' + g.n + ')').join(', ')}</p>` : ''}
+      ${d.contacts.length ? d.contacts.map((c) => `<div class="row"><div>${esc(c.name || c.phone)}<div class="sub">${esc(c.phone)}${c.grp ? ' · ' + esc(c.grp) : ''}</div></div><button class="ghost small" data-del="${c.id}">Delete</button></div>`).join('') : '<p class="empty">No contacts yet. Add one above or upload a CSV.</p>'}
+      ${d.total > 300 ? '<p class="sub">Showing the latest 300.</p>' : ''}
+    </div>`;
+  const msg = (ok, err) => { $('#cOk').textContent = ok || ''; $('#cErr').textContent = err || ''; };
+  $('#cForm').onsubmit = async (e) => {
+    e.preventDefault(); msg();
+    try {
+      const r = await api('/api/contacts', { contacts: [{ name: $('#cName').value, phone: $('#cPhone').value, grp: $('#cGroup').value }] });
+      if (r.invalid) return msg('', 'That phone number is not valid. Use a number like 0701234567.');
+      go('contacts');
+    } catch (er) { msg('', er.message); }
+  };
+  $('#csv').onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    msg('Uploading…');
+    try {
+      const rows = parseCsv(await f.text());
+      let added = 0, invalid = 0, dup = 0;
+      for (let i = 0; i < rows.length; i += 500) {
+        const r = await api('/api/contacts', { contacts: rows.slice(i, i + 500) });
+        added += r.added; invalid += r.invalid; dup += r.duplicates;
+        msg(`Uploaded ${Math.min(i + 500, rows.length)} of ${rows.length}…`);
+      }
+      msg(`Added ${added}. Skipped ${dup} duplicates and ${invalid} invalid numbers.`);
+      setTimeout(() => go('contacts'), 1800);
+    } catch (er) { msg('', er.message); }
+  };
+  $('#view').querySelectorAll('[data-del]').forEach((b) => b.onclick = async () => { await api(`/api/contacts/${b.dataset.del}/delete`, {}); go('contacts'); });
+};
+
+VIEWS.send = async () => {
+  const [cd, td] = await Promise.all([api('/api/contacts'), api('/api/templates')]);
+  const price = me.price;
+  $('#view').innerHTML = `
+    <div class="card"><h2>New message</h2>
+      ${price > 0 ? '' : '<p class="err">Sending is not open yet. The admin has not set a price.</p>'}
+      <form id="sForm">
+        <label for="sName">Campaign name (optional)</label><input id="sName" placeholder="October offer">
+        <label for="sGroup">Send to</label>
+        <select id="sGroup"><option value="">Only the numbers I type below</option><option value="__all__">All contacts (${cd.total})</option>
+          ${cd.groups.map((g) => `<option value="${esc(g.grp)}">${esc(g.grp)} (${g.n})</option>`).join('')}</select>
+        <label for="sNums">Extra numbers (optional)</label><textarea id="sNums" style="min-height:70px" placeholder="0701234567, 0771234567"></textarea>
+        <label for="sTpl">Template</label>
+        <select id="sTpl"><option value="">Write a new message</option>${td.templates.map((t) => `<option value="${t.id}">${esc(t.title)}</option>`).join('')}</select>
+        <label for="sMsg">Message</label><textarea id="sMsg" required></textarea>
+        <div class="sub" id="sCount"></div>
+        <label for="sWhen">Send later (optional)</label><input id="sWhen" type="datetime-local">
+        <div id="sCost" class="sub" style="margin-top:8px"></div>
+        <p class="err" id="sErr" role="alert"></p><p class="ok" id="sOk"></p>
+        <button class="full" type="submit" ${price > 0 ? '' : 'disabled'}>Send</button>
+      </form>
+      <p style="display:flex;gap:8px;margin:12px 0 0"><button class="ghost small" id="saveTpl" type="button">Save as template</button><button class="ghost small" id="delTpl" type="button">Delete template</button></p>
+    </div>`;
+  const counts = {};
+  cd.groups.forEach((g) => counts[g.grp] = g.n); counts.__all__ = cd.total;
+  const validNums = () => new Set((($('#sNums').value.match(/[+\d][\d\s-]{7,}/g)) || []).map((n) => n.replace(/\D/g, '').replace(/^256/, '0')).filter((n) => /^07\d{8}$/.test(n) || /^7\d{8}$/.test(n)));
+  const refresh = () => {
+    const t = $('#sMsg').value, seg = segments(t);
+    $('#sCount').textContent = `${t.length} characters · ${seg} SMS per number`;
+    const n = (counts[$('#sGroup').value] || 0) + validNums().size;
+    $('#sCost').textContent = n && seg && price ? `About ${n} numbers · ${ugx(n * seg * price)}` : '';
+  };
+  ['#sMsg', '#sNums', '#sGroup'].forEach((s) => $(s).addEventListener('input', refresh));
+  $('#sTpl').onchange = () => { const t = td.templates.find((x) => String(x.id) === $('#sTpl').value); if (t) { $('#sMsg').value = t.body; refresh(); } };
+  $('#saveTpl').onclick = async () => {
+    const title = prompt('Template name'); if (!title) return;
+    try { await api('/api/templates', { title, body: $('#sMsg').value }); go('send'); } catch (e) { $('#sErr').textContent = e.message; }
+  };
+  $('#delTpl').onclick = async () => {
+    const id = $('#sTpl').value; if (!id || !confirm('Delete this template?')) return;
+    await api(`/api/templates/${id}/delete`, {}); go('send');
+  };
+  $('#sForm').onsubmit = async (e) => {
+    e.preventDefault(); $('#sErr').textContent = ''; $('#sOk').textContent = '';
+    if (!confirm($('#sCost').textContent ? `${$('#sCost').textContent}. Send now?` : 'Send this message?')) return;
+    const w = $('#sWhen').value;
+    try {
+      const r = await api('/api/campaigns', { name: $('#sName').value, group: $('#sGroup').value, numbers: $('#sNums').value, message_text: $('#sMsg').value, scheduled_at: w ? new Date(w).toISOString() : null });
+      $('#sOk').textContent = r.status === 'scheduled' ? 'Scheduled.' : r.status === 'failed' ? 'The provider did not accept the messages. Your credit was returned.' : `Queued for ${r.recipients} numbers.`;
+      setTimeout(() => go('home'), 1500);
+    } catch (er) { $('#sErr').textContent = er.message; }
+  };
+  refresh();
+};
+
+VIEWS.wallet = async () => {
+  const [w, m] = await Promise.all([api('/api/wallet'), api('/api/me')]);
+  me = { ...me, ...m };
+  const KIND = { topup: 'Top-up', send: 'Message sent', refund: 'Refund' };
+  $('#view').innerHTML = `
+    <div class="stats"><div class="stat"><span class="sub">Wallet balance</span><b>${ugx(m.business.balance)}</b></div>
+    <div class="stat"><span class="sub">Price per SMS</span><b>${m.price > 0 ? ugx(m.price) : 'Not set'}</b></div></div>
+    <div class="card"><h2>History</h2>
+    ${w.ledger.length ? w.ledger.map((l) => `<div class="row"><div>${KIND[l.kind] || l.kind}<div class="sub">${esc(l.note)} · ${new Date(l.created_at.replace(' ', 'T') + 'Z').toLocaleString()}</div></div><div class="${l.amount > 0 ? 'pos' : 'neg'}">${l.amount > 0 ? '+' : ''}${Number(l.amount).toLocaleString('en-US')}</div></div>`).join('') : '<p class="empty">Nothing yet. To add credit, pay your provider and they will top up your wallet.</p>'}
+    </div>`;
+};
+
+// ----- Admin views -----
+VIEWS.businesses = async () => {
+  const { businesses } = await api('/api/admin/businesses');
+  $('#view').innerHTML = `
+    <div class="card"><h2>Add a business</h2>
+      <form id="bizForm">
+        <label for="bName">Business name</label><input id="bName" required>
+        <label for="bEmail">Login email</label><input id="bEmail" type="email" autocomplete="off" required>
+        <label for="bPass">Password (at least 8 characters)</label><input id="bPass" type="text" autocomplete="off" minlength="8" required>
+        <p class="err" id="bizErr" role="alert"></p>
+        <button class="full" type="submit">Create business</button>
+      </form></div>
+    <div class="card"><h2>Businesses</h2>
+    ${businesses.length ? businesses.map((b) => `<div class="row"><div>${esc(b.name)}${b.active ? '' : ' (off)'}<div class="sub">${esc(b.email || '')} · ${ugx(b.balance)}</div></div>
+      <div style="display:flex;gap:6px"><button class="small" data-top="${b.id}">Top up</button><button class="ghost small" data-act="${b.id}" data-on="${b.active ? 0 : 1}">${b.active ? 'Switch off' : 'Switch on'}</button></div></div>`).join('') : '<p class="empty">No businesses yet. Add your first one above.</p>'}
+    <p class="err" id="topErr"></p></div>`;
+  $('#bizForm').onsubmit = async (e) => {
+    e.preventDefault(); $('#bizErr').textContent = '';
+    try { await api('/api/admin/businesses', { name: $('#bName').value, email: $('#bEmail').value, password: $('#bPass').value }); go('businesses'); }
+    catch (er) { $('#bizErr').textContent = er.message; }
+  };
+  $('#view').querySelectorAll('[data-top]').forEach((b) => b.onclick = async () => {
+    const amount = prompt('Amount to add in UGX (use a minus number to remove)'); if (!amount) return;
+    const note = prompt('Note (for example: MTN MoMo ref)') || '';
+    try { await api('/api/admin/topup', { business_id: Number(b.dataset.top), amount: Number(amount), note }); go('businesses'); }
+    catch (er) { $('#topErr').textContent = er.message; }
+  });
+  $('#view').querySelectorAll('[data-act]').forEach((b) => b.onclick = async () => {
+    await api(`/api/admin/businesses/${b.dataset.act}/active`, { active: b.dataset.on === '1' }); go('businesses');
+  });
+};
+
+VIEWS.settings = async () => {
+  const s = await api('/api/admin/settings');
+  $('#view').innerHTML = `
+    <div class="stats"><div class="stat"><span class="sub">AlieSMS balance</span><b>${s.provider_balance == null ? 'Unavailable' : ugx(s.provider_balance)}</b></div></div>
+    <div class="card"><h2>Prices</h2>
+      <form id="setForm">
+        <label for="pPrice">Price you charge per SMS (UGX)</label><input id="pPrice" type="number" min="0" inputmode="numeric" value="${s.price_per_sms}">
+        <label for="pCost">Your cost per SMS at AlieSMS (UGX, optional)</label><input id="pCost" type="number" min="0" inputmode="numeric" value="${s.provider_cost_per_sms}">
+        <p class="sub">Sending stays closed while the price is 0. If you enter your cost, sends are blocked when your AlieSMS balance is too low.</p>
+        <p class="err" id="setErr" role="alert"></p><p class="ok" id="setOk"></p>
+        <button class="full" type="submit">Save prices</button>
+      </form></div>`;
+  $('#setForm').onsubmit = async (e) => {
+    e.preventDefault(); $('#setErr').textContent = ''; $('#setOk').textContent = '';
+    try { await api('/api/admin/settings', { price_per_sms: $('#pPrice').value, provider_cost_per_sms: $('#pCost').value }); $('#setOk').textContent = 'Saved.'; }
+    catch (er) { $('#setErr').textContent = er.message; }
+  };
+};
+
+async function start() {
+  try {
+    me = await api('/api/me');
+    show('#login', false); show('#app', true);
+    $('#who').textContent = me.email;
+    $('#title').textContent = me.role === 'admin' ? 'Admin' : me.business.name;
+    go(me.role === 'admin' ? 'businesses' : 'home');
+  } catch (e) { me = null; show('#app', false); show('#login', true); }
+}
+
+$('#loginForm').addEventListener('submit', async (ev) => {
+  ev.preventDefault(); $('#loginErr').textContent = '';
+  try { await api('/api/login', { email: $('#email').value, password: $('#password').value }); $('#password').value = ''; await start(); }
+  catch (e) { $('#loginErr').textContent = e.message; }
+});
+$('#logout').addEventListener('click', async () => { await api('/api/logout', {}).catch(() => {}); location.reload(); });
+start();
+</script>
+</body>
+</html>

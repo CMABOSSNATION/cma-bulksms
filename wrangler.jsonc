@@ -1,0 +1,17 @@
+{
+  "name": "cma-bulksms",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "./public",
+    "run_worker_first": ["/api/*"]
+  },
+  "triggers": { "crons": ["* * * * *"] },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "cma-bulksms",
+      "database_id": "PASTE_YOUR_D1_DATABASE_ID_HERE"
+    }
+  ]
+}
