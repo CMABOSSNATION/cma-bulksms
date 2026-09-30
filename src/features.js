@@ -25,6 +25,14 @@ export function normPhone(raw) {
   return /^07\d{8}$/.test(d) ? d : null;
 }
 
+export function wrapMessage(biz, text) {
+  const name = (biz.sender_name || biz.name || '').trim();
+  let out = name ? `${name}: ${text}` : text;
+  if (biz.contact_phone) out += `\nContact ${biz.contact_phone}`;
+  if (biz.optout_line && biz.contact_phone) out += '\nTo opt out, call that number.';
+  return out;
+}
+
 async function getSetting(env, k) {
   const r = await env.DB.prepare('SELECT value FROM settings WHERE key = ?').bind(k).first();
   return r ? r.value : null;
@@ -109,18 +117,21 @@ async function dispatch(env, id) {
 }
 
 async function createCampaign(env, user, b) {
-  const text = String(b.message_text || '').trim();
-  if (!text) return json({ error: 'Write a message first' }, 400);
+  const rawText = String(b.message_text || '').trim();
+  if (!rawText) return json({ error: 'Write a message first' }, 400);
   const price = Number((await getSetting(env, 'price_per_sms')) || 0);
   if (!(price > 0)) return json({ error: 'Sending is not open yet. The admin has not set a price.' }, 403);
+  const biz = await env.DB.prepare('SELECT name, sender_name, contact_phone, optout_line FROM businesses WHERE id = ?').bind(user.business_id).first();
+  if (!biz.contact_phone) return json({ error: 'Add your contact number in Settings before sending' }, 400);
+  const text = wrapMessage(biz, rawText);
 
   const set = new Set();
   const typed = String(b.numbers || '').split(/[\s,;]+/).filter(Boolean);
   for (const n of typed) { const p = normPhone(n); if (p) set.add(p); }
   if (b.group) {
     const q = b.group === '__all__'
-      ? env.DB.prepare('SELECT phone FROM contacts WHERE business_id = ?').bind(user.business_id)
-      : env.DB.prepare('SELECT phone FROM contacts WHERE business_id = ? AND grp = ?').bind(user.business_id, b.group);
+      ? env.DB.prepare('SELECT phone FROM contacts WHERE business_id = ? AND optout = 0').bind(user.business_id)
+      : env.DB.prepare('SELECT phone FROM contacts WHERE business_id = ? AND grp = ? AND optout = 0').bind(user.business_id, b.group);
     const { results } = await q.all();
     for (const r of results) set.add(r.phone);
   }
@@ -278,7 +289,7 @@ export async function handleFeature(req, env, user, path) {
   }
 
   if (path === '/api/contacts' && m === 'GET') {
-    const { results } = await env.DB.prepare('SELECT id, name, phone, grp FROM contacts WHERE business_id = ? ORDER BY id DESC LIMIT 300').bind(bid).all();
+    const { results } = await env.DB.prepare('SELECT id, name, phone, grp, optout FROM contacts WHERE business_id = ? ORDER BY id DESC LIMIT 300').bind(bid).all();
     const g = await env.DB.prepare("SELECT grp, COUNT(*) AS n FROM contacts WHERE business_id = ? GROUP BY grp").bind(bid).all();
     const total = g.results.reduce((s, r) => s + r.n, 0);
     return json({ contacts: results, groups: g.results.filter((r) => r.grp), total });
@@ -300,6 +311,23 @@ export async function handleFeature(req, env, user, path) {
   }
   if ((x = path.match(/^\/api\/contacts\/(\d+)\/delete$/)) && m === 'POST') {
     await env.DB.prepare('DELETE FROM contacts WHERE id = ? AND business_id = ?').bind(x[1], bid).run();
+    return json({ ok: true });
+  }
+
+  if (path === '/api/profile' && m === 'GET') {
+    return json(await env.DB.prepare('SELECT name, sender_name, contact_phone, optout_line FROM businesses WHERE id = ?').bind(bid).first());
+  }
+  if (path === '/api/profile' && m === 'POST') {
+    const b = await body();
+    const phone = String(b.contact_phone || '').trim();
+    if (!/^\+?[\d\s-]{7,20}$/.test(phone)) return json({ error: 'Enter a phone number people can call, like 0701234567' }, 400);
+    await env.DB.prepare('UPDATE businesses SET sender_name = ?, contact_phone = ?, optout_line = ? WHERE id = ?')
+      .bind(String(b.sender_name || '').trim().slice(0, 30), phone, b.optout_line ? 1 : 0, bid).run();
+    return json({ ok: true });
+  }
+  if ((x = path.match(/^\/api\/contacts\/(\d+)\/optout$/)) && m === 'POST') {
+    const b = await body();
+    await env.DB.prepare('UPDATE contacts SET optout = ? WHERE id = ? AND business_id = ?').bind(b.optout ? 1 : 0, x[1], bid).run();
     return json({ ok: true });
   }
 

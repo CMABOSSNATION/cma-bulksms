@@ -94,7 +94,7 @@ function segments(t) {
 }
 
 const TABS = {
-  business: [['home', 'Home'], ['contacts', 'Contacts'], ['send', 'Send'], ['wallet', 'Wallet']],
+  business: [['home', 'Home'], ['contacts', 'Contacts'], ['send', 'Send'], ['wallet', 'Wallet'], ['profile', 'Settings']],
   admin: [['businesses', 'Businesses'], ['settings', 'Settings']],
 };
 const VIEWS = {};
@@ -162,7 +162,7 @@ VIEWS.contacts = async () => {
     </div>
     <div class="card"><h2>Contacts (${d.total})</h2>
       ${d.groups.length ? `<p class="sub">Groups: ${d.groups.map((g) => esc(g.grp) + ' (' + g.n + ')').join(', ')}</p>` : ''}
-      ${d.contacts.length ? d.contacts.map((c) => `<div class="row"><div>${esc(c.name || c.phone)}<div class="sub">${esc(c.phone)}${c.grp ? ' · ' + esc(c.grp) : ''}</div></div><button class="ghost small" data-del="${c.id}">Delete</button></div>`).join('') : '<p class="empty">No contacts yet. Add one above or upload a CSV.</p>'}
+      ${d.contacts.length ? d.contacts.map((c) => `<div class="row"><div>${esc(c.name || c.phone)}<div class="sub">${esc(c.phone)}${c.grp ? ' · ' + esc(c.grp) : ''}${c.optout ? ' · Opted out' : ''}</div></div><div style="display:flex;gap:6px"><button class="ghost small" data-opt="${c.id}" data-on="${c.optout ? 0 : 1}">${c.optout ? 'Opt back in' : 'Mark opted out'}</button><button class="ghost small" data-del="${c.id}">Delete</button></div></div>`).join('') : '<p class="empty">No contacts yet. Add one above or upload a CSV.</p>'}
       ${d.total > 300 ? '<p class="sub">Showing the latest 300.</p>' : ''}
     </div>`;
   const msg = (ok, err) => { $('#cOk').textContent = ok || ''; $('#cErr').textContent = err || ''; };
@@ -189,15 +189,17 @@ VIEWS.contacts = async () => {
       setTimeout(() => go('contacts'), 1800);
     } catch (er) { msg('', er.message); }
   };
+  $('#view').querySelectorAll('[data-opt]').forEach((b) => b.onclick = async () => { await api(`/api/contacts/${b.dataset.opt}/optout`, { optout: b.dataset.on === '1' }); go('contacts'); });
   $('#view').querySelectorAll('[data-del]').forEach((b) => b.onclick = async () => { await api(`/api/contacts/${b.dataset.del}/delete`, {}); go('contacts'); });
 };
 
 VIEWS.send = async () => {
-  const [cd, td] = await Promise.all([api('/api/contacts'), api('/api/templates')]);
+  const [cd, td, prof] = await Promise.all([api('/api/contacts'), api('/api/templates'), api('/api/profile')]);
   const price = me.price;
   $('#view').innerHTML = `
     <div class="card"><h2>New message</h2>
       ${price > 0 ? '' : '<p class="err">Sending is not open yet. The admin has not set a price.</p>'}
+      ${prof.contact_phone ? '' : '<p class="err">Add your contact number in Settings before sending.</p>'}
       <form id="sForm">
         <label for="sName">Campaign name (optional)</label><input id="sName" placeholder="October offer">
         <label for="sGroup">Send to</label>
@@ -208,6 +210,7 @@ VIEWS.send = async () => {
         <select id="sTpl"><option value="">Write a new message</option>${td.templates.map((t) => `<option value="${t.id}">${esc(t.title)}</option>`).join('')}</select>
         <label for="sMsg">Message</label><textarea id="sMsg" required></textarea>
         <div class="sub" id="sCount"></div>
+        <pre id="sPrev" class="sub" style="white-space:pre-wrap;font:inherit;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;margin:8px 0"></pre>
         <label for="sWhen">Send later (optional)</label><input id="sWhen" type="datetime-local">
         <div id="sCost" class="sub" style="margin-top:8px"></div>
         <p class="err" id="sErr" role="alert"></p><p class="ok" id="sOk"></p>
@@ -215,12 +218,21 @@ VIEWS.send = async () => {
       </form>
       <p style="display:flex;gap:8px;margin:12px 0 0"><button class="ghost small" id="saveTpl" type="button">Save as template</button><button class="ghost small" id="delTpl" type="button">Delete template</button></p>
     </div>`;
+  const wrap = (m) => {
+    m = m.trim(); if (!m) return '';
+    const n = (prof.sender_name || prof.name || '').trim();
+    let o = n ? `${n}: ${m}` : m;
+    if (prof.contact_phone) o += `\nContact ${prof.contact_phone}`;
+    if (prof.optout_line && prof.contact_phone) o += '\nTo opt out, call that number.';
+    return o;
+  };
   const counts = {};
   cd.groups.forEach((g) => counts[g.grp] = g.n); counts.__all__ = cd.total;
   const validNums = () => new Set((($('#sNums').value.match(/[+\d][\d\s-]{7,}/g)) || []).map((n) => n.replace(/\D/g, '').replace(/^256/, '0')).filter((n) => /^07\d{8}$/.test(n) || /^7\d{8}$/.test(n)));
   const refresh = () => {
-    const t = $('#sMsg').value, seg = segments(t);
-    $('#sCount').textContent = `${t.length} characters · ${seg} SMS per number`;
+    const t = wrap($('#sMsg').value), seg = segments(t);
+    $('#sPrev').textContent = t;
+    $('#sCount').textContent = t ? `${t.length} characters with your details · ${seg} SMS per number` : '';
     const n = (counts[$('#sGroup').value] || 0) + validNums().size;
     $('#sCost').textContent = n && seg && price ? `About ${n} numbers · ${ugx(n * seg * price)}` : '';
   };
@@ -257,6 +269,26 @@ VIEWS.wallet = async () => {
     <div class="card"><h2>History</h2>
     ${w.ledger.length ? w.ledger.map((l) => `<div class="row"><div>${KIND[l.kind] || l.kind}<div class="sub">${esc(l.note)} · ${new Date(l.created_at.replace(' ', 'T') + 'Z').toLocaleString()}</div></div><div class="${l.amount > 0 ? 'pos' : 'neg'}">${l.amount > 0 ? '+' : ''}${Number(l.amount).toLocaleString('en-US')}</div></div>`).join('') : '<p class="empty">Nothing yet. To add credit, pay your provider and they will top up your wallet.</p>'}
     </div>`;
+};
+
+VIEWS.profile = async () => {
+  const p = await api('/api/profile');
+  $('#view').innerHTML = `
+    <div class="card"><h2>Message details</h2>
+      <p class="sub">These are added to every message so people know who it is from. They count toward the message length.</p>
+      <form id="pForm">
+        <label for="pName">Name shown in messages</label><input id="pName" maxlength="30" value="${esc(p.sender_name || p.name)}">
+        <label for="pPhone">Contact number</label><input id="pPhone" inputmode="tel" placeholder="0701234567" value="${esc(p.contact_phone)}" required>
+        <label style="display:flex;gap:8px;align-items:center"><input id="pOpt" type="checkbox" style="width:auto" ${p.optout_line ? 'checked' : ''}> Add an opt-out line</label>
+        <p class="sub">When someone asks to stop, open Contacts and tap Mark opted out. They are skipped in future sends.</p>
+        <p class="err" id="pErr" role="alert"></p><p class="ok" id="pOk"></p>
+        <button class="full" type="submit">Save</button>
+      </form></div>`;
+  $('#pForm').onsubmit = async (e) => {
+    e.preventDefault(); $('#pErr').textContent = ''; $('#pOk').textContent = '';
+    try { await api('/api/profile', { sender_name: $('#pName').value, contact_phone: $('#pPhone').value, optout_line: $('#pOpt').checked }); $('#pOk').textContent = 'Saved.'; }
+    catch (er) { $('#pErr').textContent = er.message; }
+  };
 };
 
 // ----- Admin views -----
