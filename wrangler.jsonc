@@ -11,7 +11,7 @@
     {
       "binding": "DB",
       "database_name": "cma-bulksms",
-      "database_id": "PASTE_YOUR_D1_DATABASE_ID_HERE"
+      "database_id": "675c9556-5a63-4f69-8ff2-52ffc7da8f52"
     }
   ]
 }
